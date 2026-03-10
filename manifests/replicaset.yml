@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: ReplicaSet
 metadata:
-  name: nginx-rs
+  name: busybox-rs
   namespace: nginx-ns
   labels:
-    app: nginx-rs
+    app: busybox-app
 spec:
   replicas: 3
   selector:
@@ -19,12 +19,9 @@ spec:
         - name: busybox
           image: busybox:latest
           command: 
-            - /bin/sh
+            - sh
             - -c
-            - |
-              mkdir -p /www
-              echo "<h1>Hello from $(hostname)</h1>" > /www/index.html
-              httpd -f -p 8080
+            - "mkdir -p /www && echo '<h1>Hello from BusyBox</h1>' > /www/index.html && httpd -f -p 8080"
           ports:
             - containerPort: 8080
           resources:
