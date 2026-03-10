@@ -9,17 +9,18 @@ spec:
   replicas: 3
   selector:
     matchLabels:
-      app: nginx-rs        # RS adopts any pod with this label
+      app: busybox-app     # RS adopts any pod with this label
   template:
     metadata:
       labels:
-        app: nginx-rs      # must match selector.matchLabels
+        app: busybox-app   # must match selector.matchLabels
     spec:
       containers:
-        - name: nginx
-          image: nginx:1.25
+        - name: busybox
+          image: busybox:latest
+          command: ["httpd", "-f", "-p", "8080"]
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           resources:
             requests:
               memory: "64Mi"
