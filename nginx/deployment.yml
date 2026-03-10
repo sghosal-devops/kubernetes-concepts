@@ -31,10 +31,16 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nginx-deployment
+  namespace: nginx-ns          # <-- scoped to our namespace
   labels:
     app: nginx
 spec:
   replicas: 3
+  strategy:
+    type: RollingUpdate        # default, but explicit for learning
+    rollingUpdate:
+      maxSurge: 1              # one extra pod can exist during rollout
+      maxUnavailable: 1        # one pod can be down during rollout
   selector:
     matchLabels:
       app: nginx
@@ -45,7 +51,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: nginx:latest
+          image: nginx:1.25    # pinned version (not :latest) — good practice
           ports:
             - containerPort: 80
           resources:
@@ -54,4 +60,4 @@ spec:
               cpu: "100m"
             limits:
               memory: "128Mi"
-              cpu: "500m" 
+              cpu: "500m"
