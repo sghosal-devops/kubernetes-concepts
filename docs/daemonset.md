@@ -2,56 +2,68 @@
 
 ## What is a DaemonSet?
 
-A DaemonSet ensures **exactly one pod runs on every eligible node**.
-If a new node joins, DaemonSet automatically schedules a pod there.
-If a node is removed, the pod on that node is removed too.
-
-Use cases:
-- Log collectors (Fluent Bit, Filebeat)
-- Node monitoring agents (Node Exporter)
-- Security agents
-- CNI or node-level networking components
+A DaemonSet ensures one pod runs on every eligible node.
+In this repo, we use it for a real node-level logging use case: **Fluentd shipping logs toward Elasticsearch**.
 
 ---
 
-## DaemonSet vs Deployment
-
-- `Deployment`: You choose replica count (for app workloads).
-- `DaemonSet`: Kubernetes chooses count = number of eligible nodes.
-
-In a kind cluster with 1 node, a DaemonSet normally runs 1 pod.
-
----
-
-## Manifest Used
+## Fluentd + Elasticsearch DaemonSet
 
 File: `manifests/daemonset.yml`
 
-- Name: `node-agent-ds`
-- Namespace: `nginx-ns`
-- Image: `busybox:latest`
-- Behavior: prints a heartbeat log every 15 seconds
+This manifest deploys:
+- DaemonSet name: `fluentd-elasticsearch`
+- Namespace: `kube-system`
+- Container image: `quay.io/fluentd_elasticsearch/fluentd:v5.0.1`
+- Host log mount: node `/var/log` mounted into pod `/var/log`
+
+Why this pattern:
+- DaemonSet gives one Fluentd pod per node.
+- `hostPath: /var/log` lets Fluentd read node logs.
+- Running in `kube-system` is common for cluster-level agents.
+
+---
+
+## Important Fields Explained
+
+1. `selector.matchLabels` and `template.metadata.labels`
+- Must match exactly.
+- This is how DaemonSet identifies its pods.
+
+2. `tolerations`
+- Includes tolerations for control-plane and master taints.
+- This allows Fluentd pods on control-plane nodes too.
+
+3. `resources`
+- Requests and limits are set to control memory/cpu usage for log agents.
+
+4. `terminationGracePeriodSeconds: 30`
+- Gives Fluentd time to flush buffered logs before stop.
+
+5. `volumes.hostPath`
+- Mounts node filesystem path `/var/log` into the container.
+- Powerful and required for this use case, but use carefully.
 
 ---
 
 ## Commands to Run
 
 ```bash
-# 1. Apply daemonset
+# Apply
 kubectl apply -f manifests/daemonset.yml
 
-# 2. Check daemonset status
-kubectl get daemonset -n nginx-ns
-kubectl describe daemonset node-agent-ds -n nginx-ns
+# Verify DaemonSet
+kubectl get daemonset -n kube-system
+kubectl describe daemonset fluentd-elasticsearch -n kube-system
 
-# 3. Check pods created by daemonset
-kubectl get pods -n nginx-ns -l app=node-agent -o wide
+# Verify pods
+kubectl get pods -n kube-system -l name=fluentd-elasticsearch -o wide
 
-# 4. Watch logs from daemonset pod
-kubectl logs -n nginx-ns -l app=node-agent --tail=20 --follow
+# Logs
+kubectl logs -n kube-system -l name=fluentd-elasticsearch --tail=50 --follow
 ```
 
-Expected in kind single-node:
+Expected on a single-node kind cluster:
 - `DESIRED = 1`
 - `CURRENT = 1`
 - `READY = 1`
@@ -60,24 +72,22 @@ Expected in kind single-node:
 
 ## Useful Tests
 
-### A) Delete daemonset pod (self-healing)
+### A) Self-healing
 ```bash
-kubectl delete pod -n nginx-ns -l app=node-agent
-kubectl get pods -n nginx-ns -l app=node-agent -w
+kubectl delete pod -n kube-system -l name=fluentd-elasticsearch
+kubectl get pods -n kube-system -l name=fluentd-elasticsearch -w
 ```
-A new pod should be recreated automatically.
 
-### B) Update image (rolling update style)
+### B) Rolling update image
 ```bash
-kubectl set image daemonset/node-agent-ds node-agent=busybox:1.36 -n nginx-ns
-kubectl rollout status daemonset/node-agent-ds -n nginx-ns
-kubectl get pods -n nginx-ns -l app=node-agent
+kubectl set image daemonset/fluentd-elasticsearch fluentd-elasticsearch=quay.io/fluentd_elasticsearch/fluentd:v5.0.2 -n kube-system
+kubectl rollout status daemonset/fluentd-elasticsearch -n kube-system
 ```
 
 ### C) Rollback
 ```bash
-kubectl rollout undo daemonset/node-agent-ds -n nginx-ns
-kubectl rollout status daemonset/node-agent-ds -n nginx-ns
+kubectl rollout undo daemonset/fluentd-elasticsearch -n kube-system
+kubectl rollout status daemonset/fluentd-elasticsearch -n kube-system
 ```
 
 ---
@@ -93,6 +103,6 @@ kubectl delete -f manifests/daemonset.yml
 ## Quick Revision
 
 - DaemonSet = one pod per node.
-- Great for node-level agents.
-- Pod count scales with nodes, not replicas.
-- Supports rollout, status, and rollback commands similar to Deployments.
+- Fluentd DaemonSet is used for node log collection.
+- `hostPath /var/log` is the key enabler for log scraping.
+- Tolerations allow running on control-plane nodes.
