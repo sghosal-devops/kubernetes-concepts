@@ -1,0 +1,92 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: log-archive
+  namespace: nginx-ns
+  labels:
+    app: log-archive
+spec:
+  schedule: "30 1 * * *"            # Run every day at 01:30
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Replace         # Replace old run if still active
+  startingDeadlineSeconds: 600       # Allow up to 10 minutes delay
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400 # Cleanup finished Jobs after 1 day
+      template:
+        metadata:
+          labels:
+            app: log-archive
+        spec:
+          restartPolicy: OnFailure
+          volumes:
+            - name: raw-logs
+              emptyDir: {}
+            - name: archive-out
+              emptyDir: {}
+          initContainers:
+            - name: seed-logs
+              image: alpine:3.20
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  mkdir -p /var/log/app
+                  for i in $(seq 1 200); do
+                    printf '%s level=INFO service=api msg="request=%s"\n' "$(date -u +%FT%TZ)" "${i}" >> /var/log/app/app.log
+                  done
+              volumeMounts:
+                - name: raw-logs
+                  mountPath: /var/log/app
+          containers:
+            - name: archive
+              image: python:3.11-slim
+              command:
+                - python
+                - -c
+                - |
+                  import datetime
+                  import hashlib
+                  import pathlib
+                  import tarfile
+                  import gzip
+
+                  now = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                  raw_dir = pathlib.Path("/var/log/app")
+                  out_dir = pathlib.Path("/archive")
+                  out_dir.mkdir(parents=True, exist_ok=True)
+
+                  tar_path = out_dir / f"app-logs-{now}.tar.gz"
+                  with tarfile.open(tar_path, "w:gz") as tar:
+                      for p in raw_dir.glob("*.log"):
+                          tar.add(p, arcname=p.name)
+
+                  sha = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+                  (out_dir / f"app-logs-{now}.sha256").write_text(f"{sha}  {tar_path.name}\n")
+
+                  summary = out_dir / f"summary-{now}.txt"
+                  lines = 0
+                  for p in raw_dir.glob("*.log"):
+                      with p.open("rt", encoding="utf-8") as f:
+                          lines += sum(1 for _ in f)
+                  summary.write_text(f"archive={tar_path.name}\nlog_lines={lines}\ncreated_utc={now}\n")
+
+                  print(f"Archived logs to {tar_path}")
+                  print(f"Generated checksum and summary for {lines} lines")
+              volumeMounts:
+                - name: raw-logs
+                  mountPath: /var/log/app
+                - name: archive-out
+                  mountPath: /archive
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "512Mi"

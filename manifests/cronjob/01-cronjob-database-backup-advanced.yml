@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: database-backup
+  namespace: nginx-ns
+  labels:
+    app: database-backup
+spec:
+  schedule: "0 2 * * *"              # Run every day at 2 AM
+  concurrencyPolicy: Forbid          # Prevent overlapping jobs
+  startingDeadlineSeconds: 300       # Allow job to start within 5 minutes if missed
+  suspend: false                     # CronJob active
+  successfulJobsHistoryLimit: 3      # Keep last 3 successful jobs
+  failedJobsHistoryLimit: 1          # Keep last failed job
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 172800 # Cleanup finished jobs after 2 days
+      template:
+        metadata:
+          labels:
+            app: database-backup
+        spec:
+          restartPolicy: OnFailure
+          volumes:
+            - name: backup-work
+              emptyDir: {}
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: "postgres.default.svc.cluster.local"
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: "appdb"
+                - name: PGUSER
+                  value: "backup_user"
+                - name: PGPASSWORD
+                  value: "change-me"
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  TS="$(date -u +%Y%m%dT%H%M%SZ)"
+                  OUT="/backup/appdb-${TS}.sql.gz"
+                  META="/backup/appdb-${TS}.sha256"
+                  echo "[$(date -u)] Starting PostgreSQL backup for ${PGDATABASE}"
+                  if pg_isready -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" >/dev/null 2>&1; then
+                    echo "[$(date -u)] Database reachable, running pg_dump"
+                    PGPASSWORD="${PGPASSWORD}" pg_dump \
+                      -h "${PGHOST}" \
+                      -p "${PGPORT}" \
+                      -U "${PGUSER}" \
+                      "${PGDATABASE}" | gzip -9 > "${OUT}"
+                  else
+                    echo "[$(date -u)] Database unreachable, writing demo backup payload"
+                    printf -- "-- demo backup generated at %s\n" "${TS}" | gzip -9 > "${OUT}"
+                  fi
+                  sha256sum "${OUT}" > "${META}"
+                  find /backup -type f -name '*.sql.gz' -mtime +7 -delete
+                  find /backup -type f -name '*.sha256' -mtime +7 -delete
+                  echo "[$(date -u)] Backup completed: ${OUT}"
+              volumeMounts:
+                - name: backup-work
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "512Mi"

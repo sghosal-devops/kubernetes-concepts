@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: database-backup-simple
+  namespace: nginx-ns
+  labels:
+    app: database-backup-simple
+spec:
+  schedule: "0 2 * * *"              # Run every day at 2 AM
+  concurrencyPolicy: Forbid          # Prevent overlapping jobs
+  startingDeadlineSeconds: 300       # Allow job to start within 5 minutes if missed
+  suspend: false                     # CronJob active
+  successfulJobsHistoryLimit: 3      # Keep last 3 successful jobs
+  failedJobsHistoryLimit: 1          # Keep last failed job
+  jobTemplate:
+    spec:
+      backoffLimit: 3                # Retry job 3 times if it fails
+      template:
+        metadata:
+          labels:
+            app: database-backup-simple
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: busybox:1.35
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Starting backup..."
+                  date
+                  echo "Simulating database backup"
+                  sleep 10
+                  echo "Backup complete"
