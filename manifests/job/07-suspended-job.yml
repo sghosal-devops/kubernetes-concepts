@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: myjob
+  namespace: nginx-ns
+spec:
+  suspend: true
+  parallelism: 1
+  completions: 5
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: main
+          image: busybox:latest
+          command: ["sh", "-c", "echo suspended job example; sleep 10"]
