@@ -1,9 +1,11 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: pi
+  name: pi-fixed-completion
   namespace: nginx-ns
 spec:
+  completions: 3
+  parallelism: 2
   backoffLimit: 4
   template:
     spec:
