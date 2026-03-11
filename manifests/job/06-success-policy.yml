@@ -4,7 +4,7 @@ metadata:
   name: job-success
   namespace: nginx-ns
 spec:
-  parallelism: 3
+  parallelism: 10
   completions: 10
   completionMode: Indexed
   successPolicy:
