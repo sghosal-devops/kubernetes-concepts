@@ -43,6 +43,14 @@ What to observe:
 - Data can outlive the Pod (as long as it stays on same node and path).
 - Useful for local dev/testing; avoid heavy production use unless carefully controlled.
 
+Important for multi-node clusters:
+- `hostPath` is node-local, so behavior is safest when you pin both sides.
+- Pin PV to a node using PV `nodeAffinity`.
+- Pin Pod to the same node using `nodeSelector` or node affinity.
+- Without pinning, Pod rescheduling to another node can look like "missing data".
+
+We will revisit this with proper examples in the Affinity/Taints section later.
+
 Manifest:
 - `manifests/storage/01-storage-hostpath.yml`
 
@@ -112,6 +120,54 @@ If the previous log line is still there, PVC persistence is working.
 
 ---
 
+## Deep Dive: PostgreSQL on Static PV/PVC
+
+Use this when you want to validate real database persistence.
+
+Manifests:
+- `manifests/storage/postgres/05-db-secret.yml`
+- `manifests/storage/postgres/06-pv-postgres-static.yml`
+- `manifests/storage/postgres/07-pvc-postgres-static.yml`
+- `manifests/storage/postgres/08-postgres-deployment-pvc.yml`
+- `manifests/storage/postgres/09-postgres-service.yml`
+
+Apply in order:
+
+```bash
+kubectl apply -f manifests/storage/postgres/05-db-secret.yml
+kubectl apply -f manifests/storage/postgres/06-pv-postgres-static.yml
+kubectl apply -f manifests/storage/postgres/07-pvc-postgres-static.yml
+kubectl apply -f manifests/storage/postgres/08-postgres-deployment-pvc.yml
+kubectl apply -f manifests/storage/postgres/09-postgres-service.yml
+```
+
+Verify bind and pod readiness:
+
+```bash
+kubectl get pv pv-postgres-static-01
+kubectl get pvc pvc-postgres-static-01 -n nginx-ns
+kubectl get pods -n nginx-ns -l app=postgres-pvc
+kubectl get svc postgres-pvc-svc -n nginx-ns
+```
+
+Write test data:
+
+```bash
+kubectl exec -it -n nginx-ns deploy/postgres-pvc -- sh -c "psql -U appuser -d appdb -c \"create table if not exists notes(id serial primary key, msg text); insert into notes(msg) values ('hello-from-pvc'); select * from notes order by id;\""
+```
+
+Restart pod and verify persistence:
+
+```bash
+kubectl delete pod -n nginx-ns -l app=postgres-pvc
+kubectl rollout status deploy/postgres-pvc -n nginx-ns
+kubectl exec -it -n nginx-ns deploy/postgres-pvc -- sh -c "psql -U appuser -d appdb -c \"select * from notes order by id;\""
+```
+
+If row `hello-from-pvc` is still present after pod recreation, PV/PVC persistence is confirmed.
+
+---
+
 ## Interview Points
 
 - Kubernetes volumes are mounted into containers; they are not tied to container image layers.
@@ -130,4 +186,9 @@ kubectl delete -f manifests/storage/01-storage-hostpath.yml
 kubectl delete -f manifests/storage/04-pod-uses-pvc-static.yml
 kubectl delete -f manifests/storage/03-pvc-static.yml
 kubectl delete -f manifests/storage/02-pv-hostpath-static.yml
+kubectl delete -f manifests/storage/postgres/09-postgres-service.yml
+kubectl delete -f manifests/storage/postgres/08-postgres-deployment-pvc.yml
+kubectl delete -f manifests/storage/postgres/07-pvc-postgres-static.yml
+kubectl delete -f manifests/storage/postgres/06-pv-postgres-static.yml
+kubectl delete -f manifests/storage/postgres/05-db-secret.yml
 ```
