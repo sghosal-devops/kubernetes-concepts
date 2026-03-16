@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-consumer-static
+  namespace: nginx-ns
+  labels:
+    app: pvc-consumer-static
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "writing to pvc at $(date -u +%FT%TZ)" >> /data/app.log
+          tail -f /dev/null
+      volumeMounts:
+        - name: app-data
+          mountPath: /data
+  volumes:
+    - name: app-data
+      persistentVolumeClaim:
+        claimName: pvc-static-01

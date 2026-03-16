@@ -64,12 +64,61 @@ kubectl exec -it hostpath-demo -n nginx-ns -- cat /node-data/demo.txt
 
 ---
 
+## Next Step: Static PV + PVC Binding
+
+Now that volume basics are clear, move to persistent storage via PV/PVC.
+
+Manifests:
+- `manifests/storage/02-pv-hostpath-static.yml`
+- `manifests/storage/03-pvc-static.yml`
+- `manifests/storage/04-pod-uses-pvc-static.yml`
+
+What this teaches:
+- PV is the storage supply (`1Gi`, `manual-hostpath` class).
+- PVC is the app request (`512Mi`, same class).
+- Pod mounts PVC, not PV directly.
+
+Run order:
+
+```bash
+kubectl apply -f manifests/storage/02-pv-hostpath-static.yml
+kubectl apply -f manifests/storage/03-pvc-static.yml
+
+kubectl get pv pv-hostpath-static-01
+kubectl get pvc pvc-static-01 -n nginx-ns
+```
+
+Expected:
+- PV status: `Bound`
+- PVC status: `Bound`
+
+Attach to a Pod:
+
+```bash
+kubectl apply -f manifests/storage/04-pod-uses-pvc-static.yml
+kubectl get pod pvc-consumer-static -n nginx-ns
+kubectl exec -it pvc-consumer-static -n nginx-ns -- sh -c "ls -la /data; cat /data/app.log"
+```
+
+Persistence test:
+
+```bash
+kubectl delete pod pvc-consumer-static -n nginx-ns
+kubectl apply -f manifests/storage/04-pod-uses-pvc-static.yml
+kubectl exec -it pvc-consumer-static -n nginx-ns -- cat /data/app.log
+```
+
+If the previous log line is still there, PVC persistence is working.
+
+---
+
 ## Interview Points
 
 - Kubernetes volumes are mounted into containers; they are not tied to container image layers.
 - `emptyDir` lifecycle = Pod lifecycle.
 - `hostPath` ties workload to node filesystem, so it reduces portability.
 - Production persistence is typically PV/PVC + StorageClass, not raw `hostPath`.
+- Pods consume PVCs; PVCs bind to PVs; StorageClass automates PV provisioning.
 
 ---
 
@@ -78,4 +127,7 @@ kubectl exec -it hostpath-demo -n nginx-ns -- cat /node-data/demo.txt
 ```bash
 kubectl delete -f manifests/storage/00-storage-emptydir.yml
 kubectl delete -f manifests/storage/01-storage-hostpath.yml
+kubectl delete -f manifests/storage/04-pod-uses-pvc-static.yml
+kubectl delete -f manifests/storage/03-pvc-static.yml
+kubectl delete -f manifests/storage/02-pv-hostpath-static.yml
 ```
