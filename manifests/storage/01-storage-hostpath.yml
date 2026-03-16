@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostpath-demo
+  namespace: nginx-ns
+  labels:
+    app: storage-hostpath
+spec:
+  containers:
+    - name: hostpath-reader
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Node path mounted at /node-data"
+          ls -la /node-data
+          echo "hostpath demo" > /node-data/demo.txt
+          tail -f /dev/null
+      volumeMounts:
+        - name: node-storage
+          mountPath: /node-data
+  volumes:
+    - name: node-storage
+      hostPath:
+        path: /tmp/k8s-hostpath-demo
+        type: DirectoryOrCreate
