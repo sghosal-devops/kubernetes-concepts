@@ -1,0 +1,27 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: k8s-learning-eks
+  region: <AWS_REGION>
+  version: "1.30"
+
+iam:
+  withOIDC: true
+
+managedNodeGroups:
+  - name: ng-general
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 4
+    volumeSize: 30
+    privateNetworking: false
+    labels:
+      role: general
+    tags:
+      nodegroup-role: general
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator", "controllerManager", "scheduler"]

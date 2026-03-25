@@ -1,0 +1,709 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: project-settings
+  namespace: project-ns
+data:
+  APP_ENV: learning
+  DB_HOST: postgres-svc
+  DB_PORT: "5432"
+  REDIS_HOST: redis-svc
+  REDIS_PORT: "6379"
+  REDIS_QUEUE: note-events
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-app
+  namespace: project-ns
+data:
+  app.py: |
+    import json
+    import os
+    import time
+    from flask import Flask, jsonify, request
+    import psycopg
+    import redis
+
+    app = Flask(__name__)
+
+    APP_ENV = os.getenv("APP_ENV", "learning")
+    DB_HOST = os.getenv("DB_HOST", "postgres-svc")
+    DB_PORT = int(os.getenv("DB_PORT", "5432"))
+    DB_NAME = os.getenv("POSTGRES_DB", "notesdb")
+    DB_USER = os.getenv("POSTGRES_USER", "notesuser")
+    DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "notespass123")
+    REDIS_HOST = os.getenv("REDIS_HOST", "redis-svc")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_QUEUE = os.getenv("REDIS_QUEUE", "note-events")
+    STATS_CACHE_KEY = "project:stats"
+
+    def get_conn():
+      return psycopg.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+      )
+
+    def get_redis():
+      return redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+        socket_timeout=2,
+      )
+
+    def init_db():
+      for _ in range(30):
+        try:
+          with get_conn() as conn:
+            with conn.cursor() as cur:
+              cur.execute(
+                "create table if not exists notes (id serial primary key, text varchar(255) not null, created_at timestamptz default now())"
+              )
+              cur.execute(
+                "create table if not exists note_audit (id serial primary key, note_id integer not null, event_type varchar(64) not null, payload jsonb not null, created_at timestamptz default now())"
+              )
+              cur.execute(
+                "create table if not exists note_worker_log (id serial primary key, note_id integer, event_type varchar(64) not null, payload jsonb not null, processed_at timestamptz default now())"
+              )
+              cur.execute(
+                "create table if not exists ops_heartbeat (id serial primary key, source varchar(64) not null, status varchar(32) not null, created_at timestamptz default now())"
+              )
+              conn.commit()
+          return
+        except Exception:
+          time.sleep(2)
+      raise RuntimeError("database did not become ready in time")
+
+    def cache_stats(stats):
+      try:
+        get_redis().setex(STATS_CACHE_KEY, 30, json.dumps(stats))
+      except Exception:
+        pass
+
+    def load_cached_stats():
+      try:
+        cached = get_redis().get(STATS_CACHE_KEY)
+        if cached:
+          payload = json.loads(cached)
+          payload["cached"] = True
+          return payload
+      except Exception:
+        return None
+      return None
+
+    def invalidate_stats_cache():
+      try:
+        get_redis().delete(STATS_CACHE_KEY)
+      except Exception:
+        pass
+
+    def enqueue_event(event):
+      try:
+        get_redis().rpush(REDIS_QUEUE, json.dumps(event))
+        return True
+      except Exception:
+        return False
+
+    def get_queue_depth():
+      try:
+        return get_redis().llen(REDIS_QUEUE)
+      except Exception:
+        return None
+
+    def build_stats_payload():
+      cached = load_cached_stats()
+      if cached:
+        return cached
+
+      with get_conn() as conn:
+        with conn.cursor() as cur:
+          cur.execute(
+            "select count(*), max(created_at) from notes"
+          )
+          note_count, last_note_at = cur.fetchone()
+          cur.execute(
+            "select count(*) from note_audit"
+          )
+          audit_count = cur.fetchone()[0]
+          cur.execute(
+            "select count(*) from note_worker_log"
+          )
+          processed_count = cur.fetchone()[0]
+          cur.execute(
+            "select source, status, created_at from ops_heartbeat order by created_at desc limit 1"
+          )
+          heartbeat = cur.fetchone()
+
+      stats = {
+        "app_env": APP_ENV,
+        "note_count": note_count,
+        "audit_count": audit_count,
+        "processed_count": processed_count,
+        "queue_depth": get_queue_depth(),
+        "last_note_at": last_note_at.isoformat() if last_note_at else None,
+        "latest_heartbeat": {
+          "source": heartbeat[0],
+          "status": heartbeat[1],
+          "created_at": heartbeat[2].isoformat(),
+        } if heartbeat else None,
+        "cached": False,
+      }
+      cache_stats(stats)
+      return stats
+
+    init_db()
+
+    @app.get("/api")
+    def api_root():
+      return jsonify({
+        "message": "backend api is running",
+        "environment": APP_ENV,
+        "services": ["postgres", "redis", "worker", "cronjob"],
+      })
+
+    @app.get("/api/health")
+    def health():
+      try:
+        with get_conn() as conn:
+          with conn.cursor() as cur:
+            cur.execute("select 1")
+            cur.fetchone()
+      except Exception as exc:
+        return jsonify({"status": "down", "database": False, "error": str(exc)}), 503
+
+      redis_ok = True
+      try:
+        get_redis().ping()
+      except Exception:
+        redis_ok = False
+
+      return jsonify({
+        "status": "ok" if redis_ok else "degraded",
+        "database": True,
+        "redis": redis_ok,
+      })
+
+    @app.get("/api/notes")
+    def list_notes():
+      with get_conn() as conn:
+        with conn.cursor() as cur:
+          cur.execute("select id, text, created_at from notes order by id desc")
+          rows = cur.fetchall()
+      return jsonify([
+        {"id": row[0], "text": row[1], "created_at": row[2].isoformat()} for row in rows
+      ])
+
+    @app.get("/api/audit")
+    def list_audit():
+      with get_conn() as conn:
+        with conn.cursor() as cur:
+          cur.execute(
+            "select id, note_id, event_type, created_at from note_audit order by id desc limit 10"
+          )
+          rows = cur.fetchall()
+      return jsonify([
+        {
+          "id": row[0],
+          "note_id": row[1],
+          "event_type": row[2],
+          "created_at": row[3].isoformat(),
+        }
+        for row in rows
+      ])
+
+    @app.get("/api/stats")
+    def stats():
+      return jsonify(build_stats_payload())
+
+    @app.post("/api/notes")
+    def create_note():
+      payload = request.get_json(silent=True) or {}
+      text = (payload.get("text") or "").strip()
+      if not text:
+        return jsonify({"error": "text is required"}), 400
+
+      with get_conn() as conn:
+        with conn.cursor() as cur:
+          cur.execute(
+            "insert into notes(text) values (%s) returning id, text, created_at",
+            (text,),
+          )
+          row = cur.fetchone()
+          event_payload = json.dumps({"text": row[1], "created_at": row[2].isoformat()})
+          cur.execute(
+            "insert into note_audit(note_id, event_type, payload) values (%s, %s, %s::jsonb)",
+            (row[0], "created", event_payload),
+          )
+          conn.commit()
+
+      queue_event = {
+        "note_id": row[0],
+        "event_type": "created",
+        "text": row[1],
+        "created_at": row[2].isoformat(),
+      }
+      queued = enqueue_event(queue_event)
+      invalidate_stats_cache()
+
+      return jsonify({
+        "id": row[0],
+        "text": row[1],
+        "created_at": row[2].isoformat(),
+        "queued_for_processing": queued,
+      }), 201
+
+    if __name__ == "__main__":
+      app.run(host="0.0.0.0", port=8000)
+  worker.py: |
+    import json
+    import os
+    import time
+    import psycopg
+    import redis
+
+    DB_HOST = os.getenv("DB_HOST", "postgres-svc")
+    DB_PORT = int(os.getenv("DB_PORT", "5432"))
+    DB_NAME = os.getenv("POSTGRES_DB", "notesdb")
+    DB_USER = os.getenv("POSTGRES_USER", "notesuser")
+    DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "notespass123")
+    REDIS_HOST = os.getenv("REDIS_HOST", "redis-svc")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_QUEUE = os.getenv("REDIS_QUEUE", "note-events")
+
+    def get_conn():
+      return psycopg.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+      )
+
+    def get_redis():
+      return redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+        socket_timeout=5,
+      )
+
+    def wait_for_dependencies():
+      for _ in range(40):
+        try:
+          with get_conn() as conn:
+            with conn.cursor() as cur:
+              cur.execute("select 1")
+              cur.fetchone()
+          get_redis().ping()
+          return
+        except Exception:
+          time.sleep(3)
+      raise RuntimeError("worker dependencies did not become ready in time")
+
+    def ensure_tables():
+      with get_conn() as conn:
+        with conn.cursor() as cur:
+          cur.execute(
+            "create table if not exists note_worker_log (id serial primary key, note_id integer, event_type varchar(64) not null, payload jsonb not null, processed_at timestamptz default now())"
+          )
+          conn.commit()
+
+    def process_forever():
+      redis_client = get_redis()
+      while True:
+        event = redis_client.blpop(REDIS_QUEUE, timeout=15)
+        if not event:
+          continue
+        payload = json.loads(event[1])
+        with get_conn() as conn:
+          with conn.cursor() as cur:
+            cur.execute(
+              "insert into note_worker_log(note_id, event_type, payload) values (%s, %s, %s::jsonb)",
+              (payload.get("note_id"), payload.get("event_type", "unknown"), json.dumps(payload)),
+            )
+            conn.commit()
+
+    if __name__ == "__main__":
+      wait_for_dependencies()
+      ensure_tables()
+      process_forever()
+  maintenance.py: |
+    import os
+    import psycopg
+
+    DB_HOST = os.getenv("DB_HOST", "postgres-svc")
+    DB_PORT = int(os.getenv("DB_PORT", "5432"))
+    DB_NAME = os.getenv("POSTGRES_DB", "notesdb")
+    DB_USER = os.getenv("POSTGRES_USER", "notesuser")
+    DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "notespass123")
+
+    def get_conn():
+      return psycopg.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+      )
+
+    with get_conn() as conn:
+      with conn.cursor() as cur:
+        cur.execute(
+          "create table if not exists ops_heartbeat (id serial primary key, source varchar(64) not null, status varchar(32) not null, created_at timestamptz default now())"
+        )
+        cur.execute(
+          "insert into ops_heartbeat(source, status) values (%s, %s)",
+          ("maintenance-cronjob", "ok"),
+        )
+        cur.execute(
+          "delete from ops_heartbeat where created_at < now() - interval '7 days'"
+        )
+        conn.commit()
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-app
+  namespace: project-ns
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Notes Control Plane</title>
+      <style>
+        :root {
+          --bg: #f2ede3;
+          --panel: rgba(255, 250, 242, 0.9);
+          --ink: #1f2937;
+          --muted: #6b7280;
+          --line: #dccfbb;
+          --accent: #0f766e;
+          --accent-2: #c2410c;
+          --good: #166534;
+        }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          font-family: Cambria, Georgia, serif;
+          color: var(--ink);
+          background:
+            radial-gradient(circle at top left, rgba(255, 244, 214, 0.9), transparent 25%),
+            linear-gradient(135deg, #f6f0e7, #efe6da 60%, #e8ddd1);
+        }
+        .shell {
+          max-width: 1180px;
+          margin: 28px auto;
+          padding: 24px;
+        }
+        .hero {
+          border: 1px solid var(--line);
+          border-radius: 28px;
+          padding: 28px;
+          background: var(--panel);
+          box-shadow: 0 25px 60px rgba(31, 41, 55, 0.12);
+          backdrop-filter: blur(10px);
+        }
+        .hero-top {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .eyebrow {
+          display: inline-block;
+          padding: 7px 12px;
+          border-radius: 999px;
+          background: #ecfeff;
+          color: #155e75;
+          font-size: 0.82rem;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+        h1 {
+          margin: 14px 0 10px;
+          font-size: clamp(2.4rem, 5vw, 4.3rem);
+          line-height: 0.98;
+          max-width: 8ch;
+        }
+        .lede {
+          max-width: 65ch;
+          color: var(--muted);
+          line-height: 1.65;
+          margin-bottom: 0;
+        }
+        .hero-note {
+          min-width: 250px;
+          max-width: 320px;
+          padding: 18px;
+          border-radius: 18px;
+          border: 1px solid var(--line);
+          background: rgba(255,255,255,0.75);
+        }
+        .hero-note strong {
+          display: block;
+          margin-bottom: 8px;
+        }
+        .stats-grid,
+        .content-grid {
+          display: grid;
+          gap: 18px;
+          margin-top: 22px;
+        }
+        .stats-grid {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+        .content-grid {
+          grid-template-columns: 1.15fr 0.85fr 0.85fr;
+        }
+        .card,
+        .stat {
+          background: rgba(255,255,255,0.76);
+          border: 1px solid var(--line);
+          border-radius: 20px;
+          padding: 20px;
+        }
+        .stat-label {
+          color: var(--muted);
+          font-size: 0.82rem;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+        .stat-value {
+          font-size: 2rem;
+          margin-top: 10px;
+        }
+        .stat-sub {
+          font-size: 0.9rem;
+          color: var(--muted);
+          margin-top: 8px;
+        }
+        h2 {
+          margin-top: 0;
+          margin-bottom: 14px;
+          font-size: 1.35rem;
+        }
+        input, button {
+          width: 100%;
+          font: inherit;
+          border-radius: 12px;
+        }
+        input {
+          border: 1px solid var(--line);
+          padding: 14px;
+          margin-bottom: 12px;
+          background: #fffdfa;
+        }
+        button {
+          border: none;
+          padding: 14px;
+          cursor: pointer;
+          color: white;
+          background: linear-gradient(135deg, var(--accent), #2563eb);
+        }
+        .status {
+          margin-top: 12px;
+          min-height: 1.4em;
+          color: var(--good);
+        }
+        ul {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+        }
+        li {
+          padding: 13px 0;
+          border-bottom: 1px dashed var(--line);
+        }
+        li:last-child {
+          border-bottom: none;
+        }
+        .meta {
+          display: block;
+          margin-top: 5px;
+          color: var(--muted);
+          font-size: 0.9rem;
+        }
+        .pill {
+          display: inline-block;
+          padding: 5px 10px;
+          background: #fff7ed;
+          color: var(--accent-2);
+          border-radius: 999px;
+          font-size: 0.82rem;
+          margin-top: 10px;
+        }
+        @media (max-width: 980px) {
+          .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .content-grid { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 640px) {
+          .shell { margin: 12px auto; padding: 14px; }
+          .hero { padding: 20px; }
+          .stats-grid { grid-template-columns: 1fr; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="shell">
+        <section class="hero">
+          <div class="hero-top">
+            <div>
+              <span class="eyebrow">Ingress + Stateful + Queue Demo</span>
+              <h1>Notes Control Plane</h1>
+              <p class="lede">This version is no longer just frontend plus backend plus database. It also includes Redis for queueing and cache, a worker that processes note events, and a scheduled maintenance task writing operational heartbeats.</p>
+            </div>
+            <aside class="hero-note">
+              <strong>Architecture lanes</strong>
+              <div>NGINX frontend</div>
+              <div>Flask API</div>
+              <div>Postgres StatefulSet</div>
+              <div>Redis queue and cache</div>
+              <div>Worker deployment</div>
+              <div>CronJob heartbeat</div>
+              <span class="pill" id="envPill">environment: loading</span>
+            </aside>
+          </div>
+
+          <div class="stats-grid">
+            <article class="stat">
+              <div class="stat-label">Notes</div>
+              <div class="stat-value" id="noteCount">-</div>
+              <div class="stat-sub" id="lastNoteAt">waiting for API</div>
+            </article>
+            <article class="stat">
+              <div class="stat-label">Audit Events</div>
+              <div class="stat-value" id="auditCount">-</div>
+              <div class="stat-sub">Every note write is audited</div>
+            </article>
+            <article class="stat">
+              <div class="stat-label">Worker Processed</div>
+              <div class="stat-value" id="processedCount">-</div>
+              <div class="stat-sub" id="queueDepth">queue depth: -</div>
+            </article>
+            <article class="stat">
+              <div class="stat-label">Ops Heartbeat</div>
+              <div class="stat-value" id="heartbeatStatus">-</div>
+              <div class="stat-sub" id="heartbeatTime">cronjob has not reported yet</div>
+            </article>
+          </div>
+
+          <div class="content-grid">
+            <section class="card">
+              <h2>Create Note</h2>
+              <input id="noteInput" placeholder="Write a note to push through the system" />
+              <button id="saveBtn">Create note and enqueue worker event</button>
+              <div class="status" id="status"></div>
+              <span class="pill" id="cacheBadge">stats cache: unknown</span>
+            </section>
+
+            <section class="card">
+              <h2>Recent Notes</h2>
+              <ul id="notes"></ul>
+            </section>
+
+            <section class="card">
+              <h2>Audit Trail</h2>
+              <ul id="audit"></ul>
+            </section>
+          </div>
+        </section>
+      </div>
+
+      <script>
+        const notesEl = document.getElementById('notes');
+        const auditEl = document.getElementById('audit');
+        const statusEl = document.getElementById('status');
+        const inputEl = document.getElementById('noteInput');
+        const btnEl = document.getElementById('saveBtn');
+        const envPillEl = document.getElementById('envPill');
+        const cacheBadgeEl = document.getElementById('cacheBadge');
+
+        async function fetchJson(path) {
+          const response = await fetch(path);
+          if (!response.ok) {
+            throw new Error(`Request failed: ${path}`);
+          }
+          return response.json();
+        }
+
+        async function loadNotes() {
+          const notes = await fetchJson('/api/notes');
+          notesEl.innerHTML = notes.map(note => `
+            <li>
+              <strong>#${note.id}</strong> ${note.text}
+              <span class="meta">${note.created_at}</span>
+            </li>
+          `).join('') || '<li>No notes yet</li>';
+        }
+
+        async function loadAudit() {
+          const audit = await fetchJson('/api/audit');
+          auditEl.innerHTML = audit.map(event => `
+            <li>
+              <strong>${event.event_type}</strong> for note #${event.note_id}
+              <span class="meta">${event.created_at}</span>
+            </li>
+          `).join('') || '<li>No audit events yet</li>';
+        }
+
+        async function loadStats() {
+          const stats = await fetchJson('/api/stats');
+          document.getElementById('noteCount').textContent = stats.note_count;
+          document.getElementById('auditCount').textContent = stats.audit_count;
+          document.getElementById('processedCount').textContent = stats.processed_count;
+          document.getElementById('queueDepth').textContent = `queue depth: ${stats.queue_depth ?? 'unavailable'}`;
+          document.getElementById('lastNoteAt').textContent = stats.last_note_at || 'no notes yet';
+          document.getElementById('heartbeatStatus').textContent = stats.latest_heartbeat?.status || 'pending';
+          document.getElementById('heartbeatTime').textContent = stats.latest_heartbeat?.created_at || 'cronjob has not reported yet';
+          envPillEl.textContent = `environment: ${stats.app_env}`;
+          cacheBadgeEl.textContent = `stats cache: ${stats.cached ? 'hit' : 'miss'}`;
+        }
+
+        async function refreshAll() {
+          await Promise.all([loadNotes(), loadAudit(), loadStats()]);
+        }
+
+        btnEl.addEventListener('click', async () => {
+          const text = inputEl.value.trim();
+          if (!text) {
+            statusEl.textContent = 'Please enter a note first.';
+            return;
+          }
+
+          statusEl.textContent = 'Creating note...';
+          const response = await fetch('/api/notes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          });
+
+          if (!response.ok) {
+            statusEl.textContent = 'Failed to save note.';
+            return;
+          }
+
+          const result = await response.json();
+          inputEl.value = '';
+          statusEl.textContent = result.queued_for_processing
+            ? 'Saved and sent to worker queue.'
+            : 'Saved, but queue push failed.';
+          await refreshAll();
+        });
+
+        refreshAll().catch(() => {
+          statusEl.textContent = 'API is not ready yet.';
+        });
+        window.setInterval(() => {
+          refreshAll().catch(() => {});
+        }, 15000);
+      </script>
+    </body>
+    </html>

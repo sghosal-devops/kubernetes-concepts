@@ -1,0 +1,18 @@
+# VPA in "Off" mode - safe way to START learning VPA
+# It only gives recommendations without touching your pods
+#
+# After applying, check recommendations with:
+#   kubectl describe vpa nginx-vpa-recommender
+
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: nginx-vpa-recommender
+  namespace: default
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-scaling-demo
+  updatePolicy:
+    updateMode: "Off"          # recommendation only, zero impact on running pods

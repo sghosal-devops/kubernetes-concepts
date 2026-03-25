@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adminer
+  namespace: project-ns
+  labels:
+    app: adminer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adminer
+  template:
+    metadata:
+      labels:
+        app: adminer
+    spec:
+      containers:
+        - name: adminer
+          image: adminer:4-standalone
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - apache2-foreground 2>&1 | tee -a /var/log/app/adminer.log
+          env:
+            - name: ADMINER_DEFAULT_SERVER
+              value: postgres-svc
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: app-logs
+              mountPath: /var/log/app
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+        - name: app-log-collector
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - touch /var/log/app/adminer.log; tail -n+1 -F /var/log/app/adminer.log
+          volumeMounts:
+            - name: app-logs
+              mountPath: /var/log/app
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "64Mi"
+      volumes:
+        - name: app-logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adminer-svc
+  namespace: project-ns
+  labels:
+    app: adminer
+spec:
+  selector:
+    app: adminer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

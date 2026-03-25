@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-echo
+  namespace: nginx-ns
+  labels:
+    app: api-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-echo
+  template:
+    metadata:
+      labels:
+        app: api-echo
+    spec:
+      containers:
+        - name: api-echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-text=api route is working"
+            - "-listen=:5678"
+          ports:
+            - containerPort: 5678
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-svc
+  namespace: nginx-ns
+  labels:
+    app: api-echo
+spec:
+  type: ClusterIP
+  selector:
+    app: api-echo
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5678

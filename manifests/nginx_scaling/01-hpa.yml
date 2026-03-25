@@ -1,0 +1,45 @@
+# HPA - Horizontal Pod Autoscaler
+# Scales the NUMBER of pod replicas based on CPU/memory usage
+# Requires: metrics-server to be installed in the cluster
+#
+# Install metrics-server (if not present):
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginx-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-scaling-demo   # must match the deployment name
+  minReplicas: 2               # never scale below this
+  maxReplicas: 10              # never scale above this
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50   # scale up when avg CPU > 50% of request
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70   # scale up when avg memory > 70% of request
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30    # wait 30s before scaling up again
+      policies:
+        - type: Pods
+          value: 2                      # add max 2 pods at a time
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 120   # wait 2 min before scaling down (avoid flapping)
+      policies:
+        - type: Pods
+          value: 1                      # remove max 1 pod at a time
+          periodSeconds: 60

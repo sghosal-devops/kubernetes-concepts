@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eks-app
+  namespace: eks-lab
+  labels:
+    app: eks-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: eks-app
+  template:
+    metadata:
+      labels:
+        app: eks-app
+    spec:
+      containers:
+        - name: app
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen=:8080"
+            - "-text=hello-from-eks"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

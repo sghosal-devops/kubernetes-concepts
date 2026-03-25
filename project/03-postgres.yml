@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: project-ns
+  labels:
+    app: postgres
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-svc
+  namespace: project-ns
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: project-ns
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - logging_collector=on
+            - -c
+            - log_destination=stderr
+            - -c
+            - log_directory=pg_log
+            - -c
+            - log_filename=postgresql.log
+          ports:
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - secretRef:
+                name: postgres-auth
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+        - name: db-log-collector
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /var/lib/postgresql/data/pg_log
+              touch /var/lib/postgresql/data/pg_log/postgresql.log
+              tail -n+1 -F /var/lib/postgresql/data/pg_log/*.log
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "64Mi"
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

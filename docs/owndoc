@@ -1,0 +1,11 @@
+aws sts get-caller-identity --profile devops-readonly
+ 1473  history
+ 1474  rm -rf ~/.aws
+ 1475  cp -r /mnt/c/Users/sghos/.aws ~/.aws
+ 1476  aws sts get-caller-identity --profile devops-readonly
+ 1477  aws sso login --profile devops-readonly
+ 1478  rm -rf ~/.aws
+ 1479  cp -r /mnt/c/Users/sghos/.aws ~/.aws
+ 1480  aws sts get-caller-identity --profile devops-readonly
+ 1481  git status
+ 1482  history

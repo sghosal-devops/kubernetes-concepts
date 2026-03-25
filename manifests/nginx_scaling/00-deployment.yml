@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-scaling-demo
+  namespace: default
+  labels:
+    app: nginx-scaling
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-scaling
+  template:
+    metadata:
+      labels:
+        app: nginx-scaling
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.24
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "100m"       # HPA and VPA both rely on resource requests
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
